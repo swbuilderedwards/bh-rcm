@@ -1,28 +1,11 @@
-# Dependencies
+# v0 runtime files
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+
+# Common ignores
 node_modules/
-vendor/
-
-# Environment
-.env
-.env.*
-!.env.example
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
+.next/
+.env*.local
 .DS_Store
-Thumbs.db
-
-# Build
-dist/
-build/
-*.egg-info/
-__pycache__/
-*.pyc
-
-# Logs
-*.log
+.vercel
