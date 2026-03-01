@@ -15,6 +15,17 @@ export interface ClaimAttempt {
   rejectDescriptions: string[] | null
 }
 
+export interface BatchSummary {
+  id: string
+  submittedAt: string | null
+  totalClaims: number
+  paidCount: number
+  rejectedCount: number
+  duplicateCount: number
+  hasNcpdpData: boolean
+  createdAt: string
+}
+
 export interface Enrollment {
   id: string
   patientName: string

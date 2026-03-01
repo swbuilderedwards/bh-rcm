@@ -25,7 +25,15 @@ export async function POST(request: Request) {
     )
   }
 
-  const batchIds = await submitClaims(parsed.data.enrollmentIds)
-
-  return NextResponse.json({ batchIds })
+  try {
+    const batchIds = await submitClaims(parsed.data.enrollmentIds)
+    return NextResponse.json({ batchIds })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : JSON.stringify(err)
+    console.error("Submit claims error:", message)
+    return NextResponse.json(
+      { error: message },
+      { status: 500 },
+    )
+  }
 }

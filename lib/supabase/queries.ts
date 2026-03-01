@@ -1,5 +1,5 @@
 import { createClient } from "./server"
-import type { ClaimStatus, ClaimAttempt, Enrollment } from "@/lib/data"
+import type { ClaimStatus, ClaimAttempt, Enrollment, BatchSummary } from "@/lib/data"
 
 const RESPONSE_LABEL: Record<string, "Paid" | "Rejected" | "Duplicate"> = {
   P: "Paid",
@@ -132,6 +132,39 @@ export async function getEnrollmentById(
     throw error
   }
   return mapEnrollment(data as unknown as EnrollmentRow)
+}
+
+type BatchRow = {
+  id: string
+  submitted_at: string | null
+  total_claims: number
+  paid_count: number
+  rejected_count: number
+  duplicate_count: number
+  request_body: string | null
+  created_at: string
+}
+
+export async function getBatches(): Promise<BatchSummary[]> {
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from("batches")
+    .select(
+      "id, submitted_at, total_claims, paid_count, rejected_count, duplicate_count, request_body, created_at"
+    )
+    .order("submitted_at", { ascending: false, nullsFirst: false })
+
+  if (error) throw error
+  return (data as unknown as BatchRow[]).map((row) => ({
+    id: row.id,
+    submittedAt: row.submitted_at,
+    totalClaims: row.total_claims,
+    paidCount: row.paid_count,
+    rejectedCount: row.rejected_count,
+    duplicateCount: row.duplicate_count,
+    hasNcpdpData: row.request_body != null,
+    createdAt: row.created_at,
+  }))
 }
 
 export async function getDashboardMetrics() {
