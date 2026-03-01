@@ -9,7 +9,6 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { NcpdpRawView } from "./ncpdp-raw-view"
 import { RecordSegmentsView } from "./ncpdp-parsed-view"
@@ -31,27 +30,83 @@ interface ParsedData {
   responseParseError?: string
 }
 
-type ViewMode = "raw" | "formatted"
-
 /**
  * Split raw NCPDP batch text into per-transmission chunks.
- * Each transmission is delimited by STX (\x02) ... ETX (\x03).
+ * Each transmission starts at an STX (\x02) and extends to the next STX
+ * (exclusive) or end of string. NCPDP batch files are line-based and do
+ * not use ETX (\x03) as a delimiter.
  */
 function splitRawTransmissions(raw: string): string[] {
   const chunks: string[] = []
-  let i = 0
-  while (i < raw.length) {
-    const stxIdx = raw.indexOf("\x02", i)
-    if (stxIdx === -1) break
-    const etxIdx = raw.indexOf("\x03", stxIdx)
-    if (etxIdx === -1) {
-      chunks.push(raw.slice(stxIdx))
-      break
-    }
-    chunks.push(raw.slice(stxIdx, etxIdx + 1))
-    i = etxIdx + 1
+  let start = raw.indexOf("\x02")
+  while (start !== -1) {
+    const next = raw.indexOf("\x02", start + 1)
+    chunks.push(next === -1 ? raw.slice(start) : raw.slice(start, next))
+    start = next
   }
   return chunks
+}
+
+interface ParsedTransmission {
+  segments?: { segment_identification: string }[]
+  transactions?: { segments?: { segment_identification: string }[] }[]
+}
+
+/**
+ * Extract the raw text for a single record from the full batch body.
+ *
+ * When a transmission has multiple transactions, the raw text is split using
+ * segment counts from the parsed data: header + shared segments come first,
+ * then each transaction's segments follow in order.
+ */
+function extractRecordRawText(
+  fullRawBody: string,
+  record: FlatRecord,
+  transmissions?: Record<string, unknown>[],
+): string | null {
+  const rawTransmissions = splitRawTransmissions(fullRawBody)
+  const rawTx = rawTransmissions[record.transmissionIndex]
+  if (!rawTx) return null
+
+  // No sub-transactions — the whole transmission IS this record
+  if (record.transactionIndexInTransmission < 0) return rawTx
+
+  const parsedTx = transmissions?.[record.transmissionIndex] as
+    | ParsedTransmission
+    | undefined
+  if (!parsedTx?.transactions?.length) return rawTx
+
+  // Strip STX/ETX wrappers so we can work with the inner content
+  let text = rawTx
+  const hasStx = text.startsWith("\x02")
+  const hasEtx = text.endsWith("\x03")
+  if (hasStx) text = text.slice(1)
+  if (hasEtx) text = text.slice(0, -1)
+
+  // Split into header (before first GS) + GS-delimited segments
+  const parts = text.split("\x1D")
+  const headerPart = parts[0]
+  const segmentParts = parts.slice(1)
+
+  const sharedCount = parsedTx.segments?.length ?? 0
+
+  // Find the start offset for the target transaction's segments
+  let txStart = sharedCount
+  for (let i = 0; i < record.transactionIndexInTransmission; i++) {
+    txStart += parsedTx.transactions[i]?.segments?.length ?? 0
+  }
+  const txSegCount =
+    parsedTx.transactions[record.transactionIndexInTransmission]?.segments
+      ?.length ?? 0
+
+  // Bounds check — fall back to the full transmission if counts don't line up
+  if (txStart + txSegCount > segmentParts.length) return rawTx
+
+  const sharedSegments = segmentParts.slice(0, sharedCount)
+  const txSegments = segmentParts.slice(txStart, txStart + txSegCount)
+
+  const combined = [headerPart, ...sharedSegments, ...txSegments].join("\x1D")
+  return (hasStx ? "\x02" : "") + combined + (hasEtx ? "\x03" : "")
 }
 
 export function BatchViewerSheet({
@@ -68,8 +123,6 @@ export function BatchViewerSheet({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedRecord, setSelectedRecord] = useState<number | null>(null)
-  const [viewMode, setViewMode] = useState<ViewMode>("formatted")
-
   const records: FlatRecord[] = parsedData?.requestParsed
     ? flattenRecords(
         parsedData.requestParsed.transmissions as Parameters<
@@ -84,8 +137,6 @@ export function BatchViewerSheet({
     setRawData(null)
     setParsedData(null)
     setSelectedRecord(null)
-    setViewMode("formatted")
-
     try {
       const [rawResp, parsedResp] = await Promise.all([
         fetch(`/api/batches/${id}/ncpdp?view=raw`),
@@ -119,9 +170,11 @@ export function BatchViewerSheet({
 
   const selectedRawText =
     selected && rawData
-      ? (splitRawTransmissions(rawData.requestBody)[
-          selected.transmissionIndex
-        ] ?? rawData.requestBody)
+      ? extractRecordRawText(
+          rawData.requestBody,
+          selected,
+          parsedData?.requestParsed?.transmissions,
+        )
       : null
 
   return (
@@ -187,28 +240,12 @@ export function BatchViewerSheet({
               Back to list
             </Button>
 
-            <Tabs
-              value={viewMode}
-              onValueChange={(v) => setViewMode(v as ViewMode)}
-            >
-              <TabsList>
-                <TabsTrigger value="formatted">Formatted</TabsTrigger>
-                <TabsTrigger value="raw">Raw</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            {selectedRawText && <NcpdpRawView text={selectedRawText} />}
 
-            {viewMode === "formatted" ? (
-              <RecordSegmentsView
-                segments={selected.segments}
-                header={selected.header}
-              />
-            ) : selectedRawText ? (
-              <NcpdpRawView text={selectedRawText} />
-            ) : (
-              <div className="text-sm text-muted-foreground p-4 text-center">
-                Raw data not available
-              </div>
-            )}
+            <RecordSegmentsView
+              segments={selected.segments}
+              header={selected.header}
+            />
           </div>
         )}
       </SheetContent>
