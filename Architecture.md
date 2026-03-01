@@ -17,7 +17,7 @@ A proof-of-concept Revenue Cycle Management portal for Big Health's billing work
 |---|---|---|
 | Portal | Next.js (deployed to Vercel, `bh-rcm` project) | `~/dev/rcm/bh-rcm` |
 | Database | Supabase (`bh_billing` project) | Hosted |
-| NCPDP encoding (Phase 2) | Python function extracted from cvs-integration-service-cluster | `~/dev/rcm/bh-rcm_py` |
+| NCPDP encoding service | Python (FastAPI on Vercel) — `bh-rcm-py` project | `~/dev/rcm/bh-rcm-py` |
 | Stub PBM | Next.js API route within the portal | `~/dev/rcm/bh-rcm` |
 
 ## Database Schema (Supabase — `bh_billing`)
@@ -348,29 +348,38 @@ Default adapter for all billing types in Phase 1. Unblocks the full UI flow.
 
 ### CVS Stub Adapter
 
-Same randomized adjudication as the stub, but enriches each claim with all NCPDP segment fields by joining through enrollments → patients/products/organizations before adjudicating:
+Exercises the **full NCPDP encode-transmit-decode pipeline** end-to-end via HTTP calls to `bh-rcm-py`:
 
-- **Header**: `bin_number`, `processor_control_number`, `date_of_service`, service provider ID, cert ID
-- **Insurance**: `cardholder_id`, `group_id`, `patient_relationship_code`, `person_code`
-- **Patient**: `date_of_birth`, `patient_gender_code`, `first_name`, `last_name`
-- **Claim**: `prescription_service_reference_number`, `product_service_id` (UPC), `quantity_dispensed`, `days_supply`
-- **Pricing**: `ingredient_cost`, `dispensing_fee`, `usual_and_customary_charge`, `gross_amount_due`
+1. **Duplicate detection** — queries `claims` table for enrollments already paid; partitions batch into duplicates (marked immediately) vs sendable claims; de-duplicates within-batch (first claim per enrollment wins)
+2. **Enrich from Supabase** — joins `enrollments` → `patients`, `products`, `organizations` to gather all NCPDP segment fields
+3. **Map to `NcpdpClaimInput`** — builds the JSON shape that `bh-rcm-py` expects
+4. **Encode** — `POST /api/claims/ncpdp/batch` → NCPDP D.0 batch text
+5. **Submit to CVS PBM Stub** — `POST /api/claims/ncpdp/stub-adjudicate` → NCPDP batch response text
+6. **Decode** — `POST /api/claims/ncpdp/parse-response-text` → parsed JSON with transmission dicts
+7. **Match responses** — extracts `prescription_service_reference_number` from segment 22, looks up claim via reference map
+8. **Write results** — updates each `claims` row (status, response_status, reject_codes) and `batches` summary counts
 
-Validates all required fields are present before adjudicating. Proves the schema carries everything needed for real NCPDP encoding without actually encoding to D.0 flat file format. Writes results to DB immediately, same as the stub.
+The **CVS PBM Stub** endpoint in `bh-rcm-py` (`/api/claims/ncpdp/stub-adjudicate`):
+- Accepts NCPDP batch text (output of `format_batch()`)
+- Parses each transmission, builds a response with: `ResponseHeader` (status `"A"`), `ResponseStatusSegment` (50/50 paid/rejected coin flip, random reject code if rejected), `ResponseClaimSegment` (echoes `prescription_service_reference_number`), `ResponsePricingSegment` (echoes submitted pricing if paid)
+- Returns NCPDP-formatted batch response as plain text
+
+This proves the entire NCPDP encode/decode chain works with realistic data before touching real CVS SFTP infrastructure.
 
 ### CVS Real Adapter (Phase 2)
 
-Replaces the CVS stub. Two independent processes:
+Replaces the CVS stub. NCPDP encoding is already built in `bh-rcm-py` — the remaining work is replacing HTTP calls with file-based delivery. Two independent processes:
 
 **Submission** (runs inside `submitBatch()`):
-1. Calls Python encoder (`bh-rcm_py`) to produce NCPDP D.0 flat file
-2. Uploads file to CVS inbound SFTP folder
-3. Returns — claim rows already marked `submitted` by submission service
+1. Same enrichment and `NcpdpClaimInput` mapping as CVS stub adapter
+2. Calls `bh-rcm-py /api/claims/ncpdp/batch` to encode to NCPDP D.0 batch text
+3. Uploads encoded file to CVS inbound SFTP folder (replaces the HTTP call to `stub-adjudicate`)
+4. Returns — claim rows already marked `submitted` by submission service
 
-**Response polling** (separate Inngest cron function):
+**Response polling** (separate Inngest cron function, replaces synchronous decode):
 1. Checks CVS outbound SFTP folder for new response files
-2. Parses NCPDP response records
-3. Matches to batches/claims by filename or reference numbers
+2. Calls `bh-rcm-py /api/claims/ncpdp/parse-response-text` to decode
+3. Matches to claims via `prescription_service_reference_number` (same logic as CVS stub adapter)
 4. Writes paid/rejected/duplicate results to `claims` table
 5. Updates `batches` summary counts
 
@@ -383,10 +392,15 @@ lib/claims/submission-service.ts    — Orchestrator (create batch/claims, deleg
 lib/claims/gateway-registry.ts      — Routes billing_type → adapter
 lib/claims/types.ts                 — PbmGateway interface, BatchSubmission type
 lib/pbm/stub-adapter.ts             — Generic stub (coin flip, write to DB)
-lib/pbm/cvs-stub-adapter.ts         — CVS stub (NCPDP validation, write to DB)
-lib/pbm/cvs-adapter.ts              — CVS real (Phase 2 — NCPDP encode, SFTP)
+lib/pbm/cvs-stub-adapter.ts         — CVS stub (full NCPDP pipeline via bh-rcm-py)
+lib/pbm/cvs-adapter.ts              — CVS real (Phase 2 — SFTP upload + Inngest poller)
 app/api/claims/submit/route.ts      — Vercel fn, called by portal UI
 app/api/claims/submit-scheduled/route.ts — Vercel fn, called by cron
+
+# bh-rcm-py (NCPDP encoding service)
+lib/ncpdp/adjudicator.py           — CVS PBM Stub adjudication logic
+lib/ncpdp/batch.py                 — + format_response_batch()
+api/index.py                       — + stub-adjudicate, parse-response-text endpoints
 ```
 
 ## Portal Views
@@ -460,13 +474,18 @@ In all cases, the submission service creates the DB rows and delegates to the ad
 - Realistic patient names, dates of birth, and PBM identifiers
 - Real UPC codes and pricing from `vbm_codes.py`
 
-## NCPDP Encoding (Phase 2)
+## NCPDP Encoding Service (`bh-rcm-py`)
 
-The NCPDP D.0 encoding logic will be **extracted from** `cvs-integration-service-cluster`'s `CaremarkMemberClaimService.ncpdp_billing_claim` method (not just referenced — the actual code will be ported). It will be installed as a Python service in `~/dev/rcm/bh-rcm_py`.
+The NCPDP D.0 encoding/decoding logic has been **extracted from** `cvs-integration-service-cluster` and deployed as a standalone FastAPI service (`bh-rcm-py`). 102 tests including golden-file certification passing.
 
-The encoding is consumed by the **CVS Real Adapter** — the only component that needs to produce NCPDP D.0. The submission service, gateway interface, and portal are all unaware of encoding format.
+Endpoints:
+- `POST /api/claims/ncpdp/encode` — single claim → encoded NCPDP string
+- `POST /api/claims/ncpdp/batch` — `NcpdpClaimInput[]` → NCPDP batch text
+- `POST /api/claims/ncpdp/parse-response` — multipart file upload → parsed transmissions
+- `POST /api/claims/ncpdp/parse-response-text` — plain text body → parsed transmissions
+- `POST /api/claims/ncpdp/stub-adjudicate` — NCPDP batch text → NCPDP response text (CVS PBM Stub)
 
-Swapping from CVS stub to CVS real adapter is a one-line change in the gateway registry. No changes to the submission service, API routes, or UI.
+The encoding is consumed by both the **CVS Stub Adapter** (full NCPDP pipeline via HTTP) and will be consumed by the **CVS Real Adapter** (SFTP upload replaces `stub-adjudicate` call). The submission service, gateway interface, and portal are all unaware of encoding format.
 
 ## What's Intentionally Skipped
 
@@ -491,9 +510,10 @@ Swapping from CVS stub to CVS real adapter is a one-line change in the gateway r
 - **Submission service + gateway plumbing** — `PbmGateway` interface, gateway registry, `submission-service.ts` with `submitClaims()` and `submitReady()`, two API routes, plus 13 unit tests
 - **Stub adapter** — Generic `PbmGateway` with coin-flip adjudication, duplicate detection (cross-batch and within-batch), writes results to `claims` and `batches` tables, plus 4 unit tests
 - **Portal UI wiring** — "Submit Claims" bulk action on enrollments table, "Resubmit" button on enrollment detail, both POST to `/api/claims/submit` with loading states and router refresh
+- **NCPDP encoding service (`bh-rcm-py`)** — Battle-tested D.0 encoder/decoder extracted from cvs-integration-service-cluster, FastAPI endpoints for single/batch encode and response parsing, 102 tests including golden-file certification
+- **CVS stub adapter** — Full NCPDP encode-transmit-decode pipeline via `bh-rcm-py`: duplicate detection, Supabase enrichment, NCPDP encoding, PBM stub adjudication, response decoding, result matching and DB writes
 
 ### Remaining
 
-1. **CVS stub adapter** — Enriches claims with NCPDP segment fields from patients/products/organizations joins, validates completeness, same coin-flip adjudication. Proves the schema supports real CVS billing. (Swap into gateway registry for `cvs` billing type.)
-2. **Vercel cron config** — Add `vercel.json` with cron schedule hitting `/api/claims/submit-scheduled` (route already exists).
-3. **CVS real adapter + NCPDP encoding (Phase 2)** — Python encoder extracted from cvs-integration-service-cluster, SFTP upload, Inngest response poller. One-line swap in gateway registry.
+1. **Vercel cron config** — Add `vercel.json` with cron schedule hitting `/api/claims/submit-scheduled` (route already exists).
+2. **CVS real adapter (Phase 2)** — NCPDP encoding is done; remaining is SFTP upload replacing HTTP call + Inngest response poller replacing synchronous decode. One-line swap in gateway registry.

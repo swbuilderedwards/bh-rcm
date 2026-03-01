@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest"
 import { getGateway } from "../gateway-registry"
 import { StubAdapter } from "@/lib/pbm/stub-adapter"
+import { CvsStubAdapter } from "@/lib/pbm/cvs-stub-adapter"
 
 describe("getGateway", () => {
   it("returns a gateway for 'cvs'", () => {
     const gw = getGateway("cvs")
-    expect(gw).toBeInstanceOf(StubAdapter)
+    expect(gw).toBeInstanceOf(CvsStubAdapter)
   })
 
   it("returns a gateway for 'esi'", () => {

@@ -1,8 +1,9 @@
 import type { PbmGateway } from "./types"
 import { StubAdapter } from "@/lib/pbm/stub-adapter"
+import { CvsStubAdapter } from "@/lib/pbm/cvs-stub-adapter"
 
 const gateways: Record<string, PbmGateway> = {
-  cvs: new StubAdapter(), // swap for CvsStubAdapter later
+  cvs: new CvsStubAdapter(),
   esi: new StubAdapter(),
   direct: new StubAdapter(),
 }
