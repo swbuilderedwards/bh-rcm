@@ -488,12 +488,12 @@ Swapping from CVS stub to CVS real adapter is a one-line change in the gateway r
 - **Enrollment detail** — Patient/product info card + claim history table
 - **UI component library** — 55+ Radix/shadcn primitives, Tailwind v4 with OKLCH, dark mode, sidebar nav
 - **Supabase integration** — SSR client, query layer (`getEnrollments`, `getEnrollmentById`, `getDashboardMetrics`), auto-generated TypeScript types
+- **Submission service + gateway plumbing** — `PbmGateway` interface, gateway registry, `submission-service.ts` with `submitClaims()` and `submitReady()`, two API routes, plus 13 unit tests
+- **Stub adapter** — Generic `PbmGateway` with coin-flip adjudication, duplicate detection (cross-batch and within-batch), writes results to `claims` and `batches` tables, plus 4 unit tests
+- **Portal UI wiring** — "Submit Claims" bulk action on enrollments table, "Resubmit" button on enrollment detail, both POST to `/api/claims/submit` with loading states and router refresh
 
 ### Remaining
 
-1. **Submission service + gateway plumbing** — `PbmGateway` interface, gateway registry, `submission-service.ts` with `submitClaims()` and `submitReady()`, two API routes (`/api/claims/submit`, `/api/claims/submit-scheduled`).
-2. **Stub adapter** — Generic stub implementing `PbmGateway`: coin-flip adjudication, duplicate detection, writes results to `claims` and `batches` tables.
-3. **CVS stub adapter** — Enriches claims with NCPDP segment fields, validates completeness, same coin-flip adjudication. Proves the schema supports real CVS billing.
-4. **Wire up portal UI** — "Submit Claims" button on enrollments table POSTs selected IDs to `/api/claims/submit`. "Resubmit" button on enrollment detail does the same for a single enrollment. Both refresh on completion.
-5. **Cron-triggered submission** — Vercel cron job hitting `/api/claims/submit-scheduled` on a schedule (e.g., every 6 hours).
-6. **CVS real adapter + NCPDP encoding (Phase 2)** — Python encoder extracted from cvs-integration-service-cluster, SFTP upload, Inngest response poller. One-line swap in gateway registry.
+1. **CVS stub adapter** — Enriches claims with NCPDP segment fields from patients/products/organizations joins, validates completeness, same coin-flip adjudication. Proves the schema supports real CVS billing. (Swap into gateway registry for `cvs` billing type.)
+2. **Vercel cron config** — Add `vercel.json` with cron schedule hitting `/api/claims/submit-scheduled` (route already exists).
+3. **CVS real adapter + NCPDP encoding (Phase 2)** — Python encoder extracted from cvs-integration-service-cluster, SFTP upload, Inngest response poller. One-line swap in gateway registry.
