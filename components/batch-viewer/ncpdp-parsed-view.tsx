@@ -43,9 +43,34 @@ function FieldGrid({ fields }: { fields: Record<string, unknown> }) {
   )
 }
 
+const SEGMENT_NAMES: Record<string, string> = {
+  "01": "Patient",
+  "02": "Pharmacy Provider",
+  "03": "Prescriber",
+  "04": "Insurance",
+  "05": "COB/Other Payments",
+  "07": "Claim",
+  "08": "DUR/PPS",
+  "10": "Compound",
+  "11": "Pricing",
+  "12": "Prior Authorization",
+  "13": "Clinical",
+  "14": "Additional Documentation",
+  "15": "Facility",
+  "16": "Narrative",
+  "20": "Response Message",
+  "21": "Response Status",
+  "22": "Response Claim",
+  "23": "Response Pricing",
+  "24": "Response DUR/PPS",
+  "25": "Response Insurance",
+  "26": "Response Prior Authorization",
+}
+
 function SegmentSection({ segment }: { segment: Segment }) {
   const segId = segment.segment_identification ?? "??"
   const { segment_identification: _, ...fields } = segment
+  const segName = SEGMENT_NAMES[segId] ?? `Segment ${segId}`
 
   return (
     <AccordionItem value={`seg-${segId}-${Math.random()}`}>
@@ -55,7 +80,7 @@ function SegmentSection({ segment }: { segment: Segment }) {
             {segId}
           </Badge>
           <span className="text-muted-foreground">
-            Segment {segId}
+            {segName}
           </span>
         </div>
       </AccordionTrigger>
@@ -109,6 +134,32 @@ function TransmissionCard({
         </Accordion>
       </CardContent>
     </Card>
+  )
+}
+
+export function RecordSegmentsView({
+  segments,
+  header,
+}: {
+  segments: Segment[]
+  header?: Record<string, unknown>
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      {header && (
+        <div className="p-2 bg-zinc-50 rounded border">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+            Header
+          </div>
+          <FieldGrid fields={header} />
+        </div>
+      )}
+      <Accordion type="multiple">
+        {segments.map((seg, i) => (
+          <SegmentSection key={i} segment={seg} />
+        ))}
+      </Accordion>
+    </div>
   )
 }
 
