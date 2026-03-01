@@ -6,6 +6,7 @@ import { format } from "date-fns"
 import { RotateCw } from "lucide-react"
 
 import type { Enrollment } from "@/lib/data"
+import { BatchViewerSheet } from "@/components/batch-viewer/batch-viewer-sheet"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -37,6 +38,7 @@ export function EnrollmentDetail({
 }) {
   const router = useRouter()
   const [submitting, setSubmitting] = useState(false)
+  const [viewingBatchId, setViewingBatchId] = useState<string | null>(null)
   const lastClaim = enrollment.claims[enrollment.claims.length - 1]
   const showResubmit = lastClaim?.response === "Rejected"
 
@@ -139,7 +141,18 @@ export function EnrollmentDetail({
                       <StatusBadge status={claim.status} />
                     </TableCell>
                     <TableCell className="font-mono text-xs">
-                      {claim.batchId}
+                      {claim.batchId && claim.status !== "pending" ? (
+                        <button
+                          type="button"
+                          className="hover:underline truncate max-w-24 inline-block text-left"
+                          title={claim.batchId}
+                          onClick={() => setViewingBatchId(claim.batchId!)}
+                        >
+                          {claim.batchId.slice(0, 8)}...
+                        </button>
+                      ) : (
+                        claim.batchId ?? "\u2014"
+                      )}
                     </TableCell>
                     <TableCell>
                       {claim.submittedAt
@@ -208,6 +221,12 @@ export function EnrollmentDetail({
           </div>
         </CardContent>
       </Card>
+
+      <BatchViewerSheet
+        batchId={viewingBatchId}
+        open={viewingBatchId !== null}
+        onOpenChange={(open) => { if (!open) setViewingBatchId(null) }}
+      />
     </div>
   )
 }

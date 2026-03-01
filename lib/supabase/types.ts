@@ -202,6 +202,8 @@ export interface Database {
           paid_count: number
           rejected_count: number
           duplicate_count: number
+          request_body: string | null
+          response_body: string | null
           created_at: string
         }
         Insert: {
@@ -211,6 +213,8 @@ export interface Database {
           paid_count?: number
           rejected_count?: number
           duplicate_count?: number
+          request_body?: string | null
+          response_body?: string | null
           created_at?: string
         }
         Update: {
@@ -220,6 +224,8 @@ export interface Database {
           paid_count?: number
           rejected_count?: number
           duplicate_count?: number
+          request_body?: string | null
+          response_body?: string | null
           created_at?: string
         }
       }
