@@ -202,14 +202,17 @@ When NCPDP encoding is added, here's where each NCPDP segment field comes from:
 
 ## Claim Status State Machine
 
+Claims are created at submission time, not at billing point hit. This matches the legacy system where `caremark_member_claim` exists from eligibility but true claim delivery only happens when the batch pipeline picks up triggered claims. In our POC, enrollments with `billing_point_hit_at` set and no claims (or only rejected claims) are the "ready to bill" pool.
+
 ```
 billing_point_hit
        │
        ▼
-    pending ──────────► submitted ──────────► paid
-  (claim created,     (in a batch,          (PBM accepted)
-   not yet sent)       sent to PBM)
-                                  ──────────► rejected
+  ready to bill ─────► submitted ──────────► paid
+  (no claim row yet;  (claim + batch        (PBM accepted)
+   enrollment has      created, sent
+   billing_point_hit   to PBM)
+   _at set)                       ──────────► rejected
                                               (PBM denied — rejection code recorded)
                                   ──────────► duplicate
                                               (PBM already paid this patient/product)
@@ -218,25 +221,173 @@ If rejected:
     user initiates resubmission
        │
        ▼
-    new claim row (sequence_number + 1) at status "pending"
+    new claim row (sequence_number + 1) at status "submitted"
 ```
 
-An enrollment's derived status is its latest claim's status.
+An enrollment's derived status is:
+- **ready to bill** — has `billing_point_hit_at` but no claims (or latest claim is `rejected`)
+- Otherwise — its latest claim's status
 
-## Stub PBM Endpoint
+## Claim Submission Architecture
 
-A Next.js API route at `/api/pbm/submit` that simulates PBM claim adjudication.
+Three-layer architecture that separates orchestration, routing, and PBM-specific logic. Designed so the submission service behaves identically regardless of whether the PBM adapter responds synchronously (stubs) or asynchronously (real CVS).
 
-**Behavior:**
-- Accepts a batch of claims (JSON)
-- ~50% of claims are paid, ~50% rejected
-- **Duplicate detection**: If a claim for the same patient/product has already been paid, returns `duplicate` instead of randomly adjudicating
-- **Rejection reason codes**: Returns realistic NCPDP-style codes:
-  - `75` — Prior Authorization Required
-  - `70` — Product Not Covered
-  - `65` — Patient Not Covered
-  - `25` — Plan Limitations Exceeded
-- Responds synchronously (no batch file / SFTP simulation needed for POC)
+```
+  TRIGGERS
+  ════════
+
+  Portal UI                    Cron / Event
+  (user selects                (e.g., every 6 hours —
+   enrollments,                 submit everything
+   clicks "Submit")             ready to bill)
+       │                            │
+       │ POST /api/claims/submit    │ POST /api/claims/submit-scheduled
+       │ { enrollmentIds: [...] }   │ (no body — queries for ready enrollments)
+       │                            │
+       ▼                            ▼
+  ┌──────────────────────────────────────────────────┐
+  │            SUBMISSION SERVICE                     │
+  │            lib/claims/submission-service.ts       │
+  │                                                  │
+  │  1. Resolve enrollments (by IDs or by filter)    │
+  │  2. Group by org.billing_type                    │
+  │  3. Create one batch per group                   │
+  │  4. Create claim rows (status: submitted)        │
+  │  5. Call gateway.submitBatch() for each batch    │
+  │  6. Return batch IDs to caller                   │
+  │                                                  │
+  │  Never writes results. Never polls. Never waits. │
+  └───────────────────┬──────────────────────────────┘
+                      │
+                      │ gateway = registry.get(org.billing_type)
+                      │ gateway.submitBatch(batch)
+                      │
+  ┌───────────────────▼──────────────────────────────┐
+  │            PBM GATEWAY INTERFACE                  │
+  │                                                  │
+  │  interface PbmGateway {                          │
+  │    submitBatch(batch: BatchSubmission): void     │
+  │  }                                               │
+  │                                                  │
+  │  Contract: adapter will write results to the DB  │
+  │  when it has them — immediately for stubs,       │
+  │  hours/days later for real PBMs.                 │
+  └───────┬──────────────┬───────────────┬───────────┘
+          │              │               │
+  ┌───────▼──────┐ ┌─────▼──────┐ ┌─────▼──────────┐
+  │ STUB         │ │ CVS STUB   │ │ CVS REAL       │
+  │ ADAPTER      │ │ ADAPTER    │ │ ADAPTER        │
+  │              │ │            │ │ (Phase 2)      │
+  │ Coin flip    │ │ Enriches   │ │                │
+  │ adjudication │ │ w/ NCPDP   │ │ submitBatch(): │
+  │              │ │ fields,    │ │  Encode NCPDP  │
+  │ Writes       │ │ validates  │ │  SFTP upload   │
+  │ results to   │ │ complete-  │ │  Return        │
+  │ claims table │ │ ness       │ │                │
+  │ immediately  │ │            │ │ Results        │
+  │              │ │ Writes     │ │ written by     │
+  │              │ │ results    │ │ separate       │
+  │              │ │ immediately│ │ Inngest poller │
+  └──────────────┘ └────────────┘ └────────────────┘
+          │              │               │
+          ▼              ▼               ▼
+  ┌──────────────────────────────────────────────────┐
+  │                    SUPABASE                       │
+  │                                                  │
+  │  Portal reads claims table on each page load.    │
+  │  Shows "submitted" until adapter writes results. │
+  │  No communication channel needed — DB is the     │
+  │  shared state between submission and response.   │
+  └──────────────────────────────────────────────────┘
+```
+
+### Gateway Registry
+
+Routes to the correct adapter based on `organizations.billing_type` (`cvs`, `esi`, `direct`). A batch maps to one PBM — if a user selects enrollments across orgs with different billing types, the submission service creates multiple batches and routes each to the right adapter.
+
+```
+lib/claims/gateway-registry.ts
+
+  const gateways: Record<string, PbmGateway> = {
+    cvs:    new CvsStubAdapter(),   // swap for CvsRealAdapter in Phase 2
+    esi:    new StubAdapter(),      // generic stub for now
+    direct: new StubAdapter(),
+  }
+```
+
+### Submission Service
+
+A TypeScript module (not a server or container) with exported functions that run inside Vercel serverless functions at request time.
+
+```
+lib/claims/submission-service.ts
+
+  submitClaims(enrollmentIds: string[])   — called by portal UI
+  submitReady()                           — called by cron trigger
+```
+
+Both resolve enrollments, group by billing type, create batches/claims, and delegate to the gateway. The only difference is how enrollments are selected — by explicit IDs or by querying for "ready to bill."
+
+### API Routes
+
+Two thin Vercel serverless functions. Each validates the request and delegates to the submission service.
+
+```
+app/api/claims/submit/route.ts            — POST, called by portal UI
+app/api/claims/submit-scheduled/route.ts  — POST, called by Vercel cron
+```
+
+### Stub Adapter
+
+Default adapter for all billing types in Phase 1. Unblocks the full UI flow.
+
+- ~50% of claims are paid, ~50% rejected (random)
+- **Duplicate detection**: If a claim for the same patient/product has already been paid, returns `duplicate`
+- **Rejection codes**: Random NCPDP-style codes: `75` (Prior Auth Required), `70` (Product Not Covered), `65` (Patient Not Covered), `25` (Plan Limitations Exceeded)
+- Writes results directly to `claims` and `batches` tables inside `submitBatch()`
+
+### CVS Stub Adapter
+
+Same randomized adjudication as the stub, but enriches each claim with all NCPDP segment fields by joining through enrollments → patients/products/organizations before adjudicating:
+
+- **Header**: `bin_number`, `processor_control_number`, `date_of_service`, service provider ID, cert ID
+- **Insurance**: `cardholder_id`, `group_id`, `patient_relationship_code`, `person_code`
+- **Patient**: `date_of_birth`, `patient_gender_code`, `first_name`, `last_name`
+- **Claim**: `prescription_service_reference_number`, `product_service_id` (UPC), `quantity_dispensed`, `days_supply`
+- **Pricing**: `ingredient_cost`, `dispensing_fee`, `usual_and_customary_charge`, `gross_amount_due`
+
+Validates all required fields are present before adjudicating. Proves the schema carries everything needed for real NCPDP encoding without actually encoding to D.0 flat file format. Writes results to DB immediately, same as the stub.
+
+### CVS Real Adapter (Phase 2)
+
+Replaces the CVS stub. Two independent processes:
+
+**Submission** (runs inside `submitBatch()`):
+1. Calls Python encoder (`bh-rcm_py`) to produce NCPDP D.0 flat file
+2. Uploads file to CVS inbound SFTP folder
+3. Returns — claim rows already marked `submitted` by submission service
+
+**Response polling** (separate Inngest cron function):
+1. Checks CVS outbound SFTP folder for new response files
+2. Parses NCPDP response records
+3. Matches to batches/claims by filename or reference numbers
+4. Writes paid/rejected/duplicate results to `claims` table
+5. Updates `batches` summary counts
+
+The portal doesn't know or care which process wrote the results. It reads from the DB on each page load.
+
+### Implementation
+
+```
+lib/claims/submission-service.ts    — Orchestrator (create batch/claims, delegate to gateway)
+lib/claims/gateway-registry.ts      — Routes billing_type → adapter
+lib/claims/types.ts                 — PbmGateway interface, BatchSubmission type
+lib/pbm/stub-adapter.ts             — Generic stub (coin flip, write to DB)
+lib/pbm/cvs-stub-adapter.ts         — CVS stub (NCPDP validation, write to DB)
+lib/pbm/cvs-adapter.ts              — CVS real (Phase 2 — NCPDP encode, SFTP)
+app/api/claims/submit/route.ts      — Vercel fn, called by portal UI
+app/api/claims/submit-scheduled/route.ts — Vercel fn, called by cron
+```
 
 ## Portal Views
 
@@ -258,54 +409,91 @@ Filterable table of patient/product combinations.
 | Product | Yes |
 | Enrolled date | |
 | Billing point date | |
-| Current claim status (derived) | Yes |
+| Current status (derived) | Yes |
 | # of attempts | |
 
-**Bulk action**: Select claims by filter → "Submit Claims" → creates a batch and submits to stub PBM.
+**Bulk action**: Select enrollments by filter (e.g., "ready to bill" or "rejected") → "Submit Claims" → creates claim rows, groups them into a batch, and submits to stub PBM.
 
 ### Enrollment Detail
 
 Click into an enrollment to see:
 - Patient and product info
 - Full claim chain: every submission attempt, its batch, PBM response, timestamps
-- "Resubmit" button on rejected claims → creates a new claim row at `pending`
+- "Resubmit" button on rejected claims → creates and submits a new claim row (sequence_number + 1)
 
 ## Claim Submission Flow
 
-1. User filters enrollments list (e.g., status = `pending` or status = `rejected`)
-2. User clicks "Submit Claims"
-3. System creates a `batch` row
-4. System assigns selected pending claims to the batch, sets `batch_id`
-5. System POSTs claims to `/api/pbm/submit`
-6. System updates each claim with PBM response (status, response_code, response_message, responded_at)
-7. System updates batch summary counts (paid_count, rejected_count, duplicate_count)
-8. Portal refreshes to show results
+### Portal-triggered (user clicks "Submit Claims")
 
-Synchronous for the POC — 100 claims is fast enough.
+1. User filters enrollments list (e.g., status = "ready to bill" or "rejected")
+2. User selects enrollments and clicks "Submit Claims"
+3. Portal POSTs `{ enrollmentIds: [...] }` to `/api/claims/submit`
+4. Submission service resolves enrollments, groups by `org.billing_type`
+5. For each group: creates a `batch` row, creates `claim` rows (sequence_number = 1 for new, +1 for resubmissions, status = `submitted`)
+6. For each batch: calls `gateway.submitBatch()` via the registry
+7. Adapter adjudicates and writes results to `claims` and `batches` tables
+8. API returns batch IDs to portal
+9. Portal refreshes — claims now show paid/rejected/duplicate
+
+### Cron-triggered (scheduled submission)
+
+1. Vercel cron POSTs to `/api/claims/submit-scheduled`
+2. Submission service queries for all enrollments that are "ready to bill"
+3. Same steps 4–7 as above
+4. No UI refresh needed — portal picks up results on next page load
+
+### Resubmission (user clicks "Resubmit" on rejected claim)
+
+1. Portal POSTs `{ enrollmentIds: [enrollmentId] }` to `/api/claims/submit`
+2. Submission service sees enrollment already has claims, creates new claim with `sequence_number + 1`
+3. Same gateway flow — adapter adjudicates and writes results
+4. Portal refreshes enrollment detail to show updated claim chain
+
+In all cases, the submission service creates the DB rows and delegates to the adapter. The adapter writes results back to the DB. The portal reads from the DB. No direct communication between adapter and portal.
 
 ## Seed Data
 
-100 patient/product combinations populated in Supabase:
-- ~30 patients, each enrolled in 1–3 products
-- All have `billing_point_hit_at` set (all are billable)
-- Each enrollment gets an initial claim at status `pending`
+~100 patient/product combinations populated in Supabase:
+- 33 patients, each enrolled in 1–3 products across 5 organizations
+- All have `billing_point_hit_at` set (all are ready to bill)
+- No claims seeded — claims are created when a user submits from the portal
 - Realistic patient names, dates of birth, and PBM identifiers
+- Real UPC codes and pricing from `vbm_codes.py`
 
 ## NCPDP Encoding (Phase 2)
 
-The NCPDP D.0 encoding logic will be **extracted from** `cvs-integration-service-cluster`'s `CaremarkMemberClaimService.ncpdp_billing_claim` method (not just referenced — the actual code will be ported). It will be installed as a Python function in `~/dev/rcm/bh-rcm_py`.
+The NCPDP D.0 encoding logic will be **extracted from** `cvs-integration-service-cluster`'s `CaremarkMemberClaimService.ncpdp_billing_claim` method (not just referenced — the actual code will be ported). It will be installed as a Python service in `~/dev/rcm/bh-rcm_py`.
 
-Phase 1: Portal sends JSON to stub PBM.
-Phase 2: Portal calls `bh-rcm_py` to encode claims as NCPDP D.0, then sends encoded claims to PBM.
+The encoding is consumed by the **CVS Real Adapter** — the only component that needs to produce NCPDP D.0. The submission service, gateway interface, and portal are all unaware of encoding format.
 
-The claim submission interface will be designed so swapping JSON for NCPDP encoding is a straightforward change.
+Swapping from CVS stub to CVS real adapter is a one-line change in the gateway registry. No changes to the submission service, API routes, or UI.
 
 ## What's Intentionally Skipped
 
 - **Eligibility verification / test claims** — all seed patients are assumed eligible
-- **SFTP delivery** — direct HTTP to stub PBM
-- **835 reconciliation** — stub PBM responds immediately
+- **SFTP delivery** — stubs write results directly to DB; real SFTP is Phase 2 (CVS Real Adapter)
+- **835 reconciliation** — stubs adjudicate immediately; async response polling is Phase 2 (Inngest cron)
 - **Bundle pricing / resolvers** — individual products only
 - **Auth / RLS** — single-user portal
-- **Real-time subscriptions** — standard request/response
-- **Inngest / async orchestration** — synchronous submission is sufficient at this scale
+- **Real-time subscriptions** — portal reads from DB on page load; no push needed
+
+## Status
+
+### Done
+
+- **Database schema** — 6 tables (organizations, products, patients, enrollments, batches, claims) with indexes, deployed to Supabase
+- **Seed data** — 33 patients, 5 orgs, 3 products, ~100 enrollments, all with `billing_point_hit_at` set (ready to bill)
+- **Dashboard** — 8 metric cards (total enrollments, claim counts by status, paid rate, total revenue)
+- **Enrollments list** — Paginated table with product & status multi-select filters
+- **Enrollment detail** — Patient/product info card + claim history table
+- **UI component library** — 55+ Radix/shadcn primitives, Tailwind v4 with OKLCH, dark mode, sidebar nav
+- **Supabase integration** — SSR client, query layer (`getEnrollments`, `getEnrollmentById`, `getDashboardMetrics`), auto-generated TypeScript types
+
+### Remaining
+
+1. **Submission service + gateway plumbing** — `PbmGateway` interface, gateway registry, `submission-service.ts` with `submitClaims()` and `submitReady()`, two API routes (`/api/claims/submit`, `/api/claims/submit-scheduled`).
+2. **Stub adapter** — Generic stub implementing `PbmGateway`: coin-flip adjudication, duplicate detection, writes results to `claims` and `batches` tables.
+3. **CVS stub adapter** — Enriches claims with NCPDP segment fields, validates completeness, same coin-flip adjudication. Proves the schema supports real CVS billing.
+4. **Wire up portal UI** — "Submit Claims" button on enrollments table POSTs selected IDs to `/api/claims/submit`. "Resubmit" button on enrollment detail does the same for a single enrollment. Both refresh on completion.
+5. **Cron-triggered submission** — Vercel cron job hitting `/api/claims/submit-scheduled` on a schedule (e.g., every 6 hours).
+6. **CVS real adapter + NCPDP encoding (Phase 2)** — Python encoder extracted from cvs-integration-service-cluster, SFTP upload, Inngest response poller. One-line swap in gateway registry.

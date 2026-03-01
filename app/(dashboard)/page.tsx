@@ -8,12 +8,12 @@ import {
   Percent,
   DollarSign,
 } from "lucide-react"
-import { getDashboardMetrics } from "@/lib/data"
+import { getDashboardMetrics } from "@/lib/supabase/queries"
 import { MetricCard } from "@/components/metric-card"
 import { PageHeader } from "@/components/page-header"
 
-export default function DashboardPage() {
-  const metrics = getDashboardMetrics()
+export default async function DashboardPage() {
+  const metrics = await getDashboardMetrics()
 
   return (
     <>

@@ -1,11 +1,7 @@
 import { notFound } from "next/navigation"
-import { getEnrollmentById, enrollments } from "@/lib/data"
+import { getEnrollmentById } from "@/lib/supabase/queries"
 import { EnrollmentDetail } from "@/components/enrollment-detail"
 import { PageHeader } from "@/components/page-header"
-
-export function generateStaticParams() {
-  return enrollments.map((e) => ({ id: e.id }))
-}
 
 export default async function EnrollmentDetailPage({
   params,
@@ -13,7 +9,7 @@ export default async function EnrollmentDetailPage({
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const enrollment = getEnrollmentById(id)
+  const enrollment = await getEnrollmentById(id)
 
   if (!enrollment) {
     notFound()
@@ -34,8 +30,7 @@ export default async function EnrollmentDetailPage({
             {enrollment.patientName}
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {enrollment.id} &middot; {enrollment.product} &middot;{" "}
-            {enrollment.organization}
+            {enrollment.product} &middot; {enrollment.organization}
           </p>
         </div>
         <EnrollmentDetail enrollment={enrollment} />

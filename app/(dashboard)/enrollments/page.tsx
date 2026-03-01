@@ -1,8 +1,10 @@
-import { enrollments } from "@/lib/data"
+import { getEnrollments } from "@/lib/supabase/queries"
 import { EnrollmentsTable } from "@/components/enrollments-table"
 import { PageHeader } from "@/components/page-header"
 
-export default function EnrollmentsPage() {
+export default async function EnrollmentsPage() {
+  const enrollments = await getEnrollments()
+
   return (
     <>
       <PageHeader

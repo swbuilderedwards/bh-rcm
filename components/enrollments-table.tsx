@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { format } from "date-fns"
 import { ChevronLeft, ChevronRight, Send } from "lucide-react"
@@ -81,7 +82,9 @@ export function EnrollmentsTable({
 }: {
   enrollments: Enrollment[]
 }) {
+  const router = useRouter()
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [submitting, setSubmitting] = useState(false)
   const [productFilter, setProductFilter] = useState<Set<string>>(new Set())
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set())
   const [page, setPage] = useState(1)
@@ -141,11 +144,25 @@ export function EnrollmentsTable({
     setPage(1)
   }
 
-  function handleSubmitClaims() {
-    alert(
-      `Submitting claims for ${selectedIds.size} enrollment(s): ${Array.from(selectedIds).join(", ")}`
-    )
-    setSelectedIds(new Set())
+  async function handleSubmitClaims() {
+    setSubmitting(true)
+    try {
+      const res = await fetch("/api/claims/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enrollmentIds: [...selectedIds] }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => null)
+        throw new Error(err?.error ?? "Submission failed")
+      }
+      setSelectedIds(new Set())
+      router.refresh()
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Submission failed")
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -167,13 +184,13 @@ export function EnrollmentsTable({
         <div className="flex-1" />
         <Button
           size="sm"
-          disabled={selectedIds.size === 0}
+          disabled={selectedIds.size === 0 || submitting}
           onClick={handleSubmitClaims}
           className="gap-1.5"
         >
           <Send className="size-3.5" />
-          Submit Claims
-          {selectedIds.size > 0 && (
+          {submitting ? "Submitting..." : "Submit Claims"}
+          {!submitting && selectedIds.size > 0 && (
             <span className="ml-0.5 text-xs opacity-80">
               ({selectedIds.size})
             </span>

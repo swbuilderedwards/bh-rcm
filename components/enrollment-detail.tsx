@@ -1,5 +1,7 @@
 "use client"
 
+import { useState } from "react"
+import { useRouter } from "next/navigation"
 import { format } from "date-fns"
 import { RotateCw } from "lucide-react"
 
@@ -33,13 +35,29 @@ export function EnrollmentDetail({
 }: {
   enrollment: Enrollment
 }) {
+  const router = useRouter()
+  const [submitting, setSubmitting] = useState(false)
   const lastClaim = enrollment.claims[enrollment.claims.length - 1]
   const showResubmit = lastClaim?.response === "Rejected"
 
-  function handleResubmit() {
-    alert(
-      `Resubmitting claim for enrollment ${enrollment.id} (sequence ${lastClaim.sequence + 1})`
-    )
+  async function handleResubmit() {
+    setSubmitting(true)
+    try {
+      const res = await fetch("/api/claims/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enrollmentIds: [enrollment.id] }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => null)
+        throw new Error(err?.error ?? "Resubmission failed")
+      }
+      router.refresh()
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Resubmission failed")
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -90,9 +108,9 @@ export function EnrollmentDetail({
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Claim History</CardTitle>
           {showResubmit && (
-            <Button size="sm" onClick={handleResubmit} className="gap-1.5">
-              <RotateCw className="size-3.5" />
-              Resubmit
+            <Button size="sm" disabled={submitting} onClick={handleResubmit} className="gap-1.5">
+              <RotateCw className={`size-3.5 ${submitting ? "animate-spin" : ""}`} />
+              {submitting ? "Submitting..." : "Resubmit"}
             </Button>
           )}
         </CardHeader>

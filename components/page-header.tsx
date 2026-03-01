@@ -1,5 +1,6 @@
 "use client"
 
+import React from "react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -30,16 +31,18 @@ export function PageHeader({
           {breadcrumbs.map((segment, index) => {
             const isLast = index === breadcrumbs.length - 1
             return (
-              <BreadcrumbItem key={segment.label}>
+              <React.Fragment key={segment.label}>
                 {index > 0 && <BreadcrumbSeparator />}
-                {isLast ? (
-                  <BreadcrumbPage>{segment.label}</BreadcrumbPage>
-                ) : (
-                  <BreadcrumbLink href={segment.href}>
-                    {segment.label}
-                  </BreadcrumbLink>
-                )}
-              </BreadcrumbItem>
+                <BreadcrumbItem>
+                  {isLast ? (
+                    <BreadcrumbPage>{segment.label}</BreadcrumbPage>
+                  ) : (
+                    <BreadcrumbLink href={segment.href}>
+                      {segment.label}
+                    </BreadcrumbLink>
+                  )}
+                </BreadcrumbItem>
+              </React.Fragment>
             )
           })}
         </BreadcrumbList>
