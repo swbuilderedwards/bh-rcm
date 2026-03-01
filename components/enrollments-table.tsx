@@ -4,7 +4,7 @@ import { useState, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { format } from "date-fns"
-import { ChevronLeft, ChevronRight, Send } from "lucide-react"
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Send, X } from "lucide-react"
 
 import type { Enrollment, ClaimStatus, Product } from "@/lib/data"
 import { StatusBadge } from "@/components/status-badge"
@@ -24,7 +24,29 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 
-const PAGE_SIZE = 8
+const PAGE_SIZE = 100
+
+type SortKey =
+  | "patientName"
+  | "product"
+  | "organization"
+  | "enrolledDate"
+  | "billingPointDate"
+  | "status"
+  | "attempts"
+type SortDir = "asc" | "desc"
+
+function compareEnrollments(a: Enrollment, b: Enrollment, key: SortKey): number {
+  switch (key) {
+    case "attempts":
+      return a.attempts - b.attempts
+    case "enrolledDate":
+    case "billingPointDate":
+      return a[key].localeCompare(b[key])
+    default:
+      return a[key].localeCompare(b[key])
+  }
+}
 
 const ALL_PRODUCTS: Product[] = ["Sleepio", "Daylight", "Spark"]
 const ALL_STATUSES: ClaimStatus[] = [
@@ -77,6 +99,37 @@ function MultiSelectFilter({
   )
 }
 
+function SortableHead({
+  column,
+  current,
+  dir,
+  onSort,
+  className,
+  children,
+}: {
+  column: SortKey
+  current: SortKey
+  dir: SortDir
+  onSort: (key: SortKey) => void
+  className?: string
+  children: React.ReactNode
+}) {
+  const active = current === column
+  const Icon = active ? (dir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
+  return (
+    <TableHead className={className}>
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        className="inline-flex items-center gap-1 hover:text-foreground -ml-2 px-2 py-1 rounded-sm hover:bg-accent transition-colors"
+      >
+        {children}
+        <Icon className={`size-3.5 ${active ? "opacity-100" : "opacity-40"}`} />
+      </button>
+    </TableHead>
+  )
+}
+
 export function EnrollmentsTable({
   enrollments,
 }: {
@@ -88,14 +141,31 @@ export function EnrollmentsTable({
   const [productFilter, setProductFilter] = useState<Set<string>>(new Set())
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set())
   const [page, setPage] = useState(1)
+  const [sortKey, setSortKey] = useState<SortKey>("patientName")
+  const [sortDir, setSortDir] = useState<SortDir>("asc")
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"))
+    } else {
+      setSortKey(key)
+      setSortDir("asc")
+    }
+    setPage(1)
+  }
 
   const filtered = useMemo(() => {
-    return enrollments.filter((e) => {
+    const result = enrollments.filter((e) => {
       if (productFilter.size > 0 && !productFilter.has(e.product)) return false
       if (statusFilter.size > 0 && !statusFilter.has(e.status)) return false
       return true
     })
-  }, [enrollments, productFilter, statusFilter])
+    result.sort((a, b) => {
+      const cmp = compareEnrollments(a, b, sortKey)
+      return sortDir === "asc" ? cmp : -cmp
+    })
+    return result
+  }, [enrollments, productFilter, statusFilter, sortKey, sortDir])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
@@ -106,6 +176,8 @@ export function EnrollmentsTable({
 
   const allSelected =
     paginated.length > 0 && paginated.every((e) => selectedIds.has(e.id))
+  const someSelected =
+    !allSelected && paginated.some((e) => selectedIds.has(e.id))
 
   function toggleAll() {
     if (allSelected) {
@@ -182,6 +254,17 @@ export function EnrollmentsTable({
           onToggle={(v) => toggleFilter(statusFilter, setStatusFilter, v)}
         />
         <div className="flex-1" />
+        {selectedIds.size > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSelectedIds(new Set())}
+            className="gap-1.5 text-muted-foreground"
+          >
+            <X className="size-3.5" />
+            Clear selection
+          </Button>
+        )}
         <Button
           size="sm"
           disabled={selectedIds.size === 0 || submitting}
@@ -205,18 +288,18 @@ export function EnrollmentsTable({
             <TableRow>
               <TableHead className="w-10">
                 <Checkbox
-                  checked={allSelected}
+                  checked={allSelected ? true : someSelected ? "indeterminate" : false}
                   onCheckedChange={toggleAll}
-                  aria-label="Select all"
+                  aria-label="Select all on this page"
                 />
               </TableHead>
-              <TableHead>Patient Name</TableHead>
-              <TableHead>Product</TableHead>
-              <TableHead>Organization</TableHead>
-              <TableHead>Enrolled Date</TableHead>
-              <TableHead>Billing Point</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Attempts</TableHead>
+              <SortableHead current={sortKey} dir={sortDir} column="patientName" onSort={toggleSort}>Patient Name</SortableHead>
+              <SortableHead current={sortKey} dir={sortDir} column="product" onSort={toggleSort}>Product</SortableHead>
+              <SortableHead current={sortKey} dir={sortDir} column="organization" onSort={toggleSort}>Organization</SortableHead>
+              <SortableHead current={sortKey} dir={sortDir} column="enrolledDate" onSort={toggleSort}>Enrolled Date</SortableHead>
+              <SortableHead current={sortKey} dir={sortDir} column="billingPointDate" onSort={toggleSort}>Billing Point</SortableHead>
+              <SortableHead current={sortKey} dir={sortDir} column="status" onSort={toggleSort}>Status</SortableHead>
+              <SortableHead current={sortKey} dir={sortDir} column="attempts" onSort={toggleSort} className="text-right">Attempts</SortableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
