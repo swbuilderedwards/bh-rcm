@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { NcpdpRawView } from "./ncpdp-raw-view"
 import { RecordSegmentsView } from "./ncpdp-parsed-view"
+import { RawAccordionItem } from "./raw-accordion-item"
 import {
   RecordListView,
   flattenRecords,
@@ -240,11 +241,14 @@ export function BatchViewerSheet({
               Back to list
             </Button>
 
-            {selectedRawText && <NcpdpRawView text={selectedRawText} />}
-
             <RecordSegmentsView
               segments={selected.segments}
               header={selected.header}
+              rawAccordionItem={
+                selectedRawText ? (
+                  <RawAccordionItem text={selectedRawText} />
+                ) : null
+              }
             />
           </div>
         )}

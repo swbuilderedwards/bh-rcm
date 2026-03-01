@@ -140,9 +140,11 @@ function TransmissionCard({
 export function RecordSegmentsView({
   segments,
   header,
+  rawAccordionItem,
 }: {
   segments: Segment[]
   header?: Record<string, unknown>
+  rawAccordionItem?: React.ReactNode
 }) {
   return (
     <div className="flex flex-col gap-3">
@@ -155,6 +157,7 @@ export function RecordSegmentsView({
         </div>
       )}
       <Accordion type="multiple">
+        {rawAccordionItem}
         {segments.map((seg, i) => (
           <SegmentSection key={i} segment={seg} />
         ))}
