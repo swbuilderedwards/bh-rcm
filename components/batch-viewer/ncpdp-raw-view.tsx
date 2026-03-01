@@ -90,8 +90,28 @@ export function NcpdpRawView({ text }: { text: string }) {
   }
 
   return (
-    <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all p-4 bg-zinc-50 rounded-lg border overflow-auto max-h-[70vh]">
-      {elements}
-    </pre>
+    <div>
+      <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all p-4 bg-zinc-50 rounded-lg border overflow-auto max-h-[70vh]">
+        {elements}
+      </pre>
+      <div className="flex gap-3 mt-1.5 px-1 text-[10px] text-muted-foreground">
+        <span>
+          <span className="text-zinc-400 bg-zinc-100 rounded px-0.5 font-semibold">STX</span>{" "}
+          Start of transmission
+        </span>
+        <span>
+          <span className="text-amber-600 bg-amber-50 rounded px-0.5 font-semibold">AM</span>{" "}
+          Segment separator
+        </span>
+        <span>
+          <span className="text-sky-600 bg-sky-50 rounded px-0.5 font-semibold">FS</span>{" "}
+          Field separator
+        </span>
+        <span>
+          <span className="text-violet-600 bg-violet-50 rounded px-0.5 font-semibold">GS</span>{" "}
+          Group separator
+        </span>
+      </div>
+    </div>
   )
 }
